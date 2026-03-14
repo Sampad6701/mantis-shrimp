@@ -1,0 +1,43 @@
+# Build artifacts
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+install_manifest.txt
+
+# Compiled binaries
+mantis
+mantis_tests
+
+# Test artifacts
+*.zst
+*.tar.zst
+test.txt
+test_dir/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Dependency directories
+vcpkg_installed/
+_deps/
+
+# Output and logs
+*.log
+Testing/
