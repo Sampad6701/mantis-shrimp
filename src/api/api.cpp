@@ -10,8 +10,9 @@ Analysis analyze(const std::filesystem::path& path) {
 
 OperationResult compress(const std::filesystem::path& path,
                          const std::filesystem::path& output_path,
-                         int compression_level) {
-  return core::Engine{}.compress(path, output_path, compression_level);
+                         int compression_level,
+                         std::string_view algorithm) {
+  return core::Engine{}.compress(path, output_path, compression_level, algorithm);
 }
 
 OperationResult extract(const std::filesystem::path& archive_path,

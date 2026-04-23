@@ -23,6 +23,9 @@ mantis_tests
 # Test artifacts
 *.zst
 *.tar.zst
+*.gz
+*.tar.gz
+*.raw
 test.txt
 test_dir/
 
