@@ -1,6 +1,6 @@
 # Mantis Shrimp v0.3.0 (Early Development)
 
-⚠️ **Development Status**: This project is in active development. v0.3.0 is a feature-complete **proof of concept** with working compression functionality, not yet production-ready. Breaking changes may occur.
+**Development Status**: This project is in active development. v0.3.0 is a feature-complete **proof of concept** with working compression functionality, not yet production-ready. Breaking changes may occur.
 
 Mantis Shrimp is a universal compression utility with a smart engine that automatically selects the best algorithm for your data.
 
@@ -272,7 +272,7 @@ mantis-shrimp/
 
 ## Development Roadmap
 
-**Phase 1 - Foundation (v0.3 ✅ CURRENT)**
+**Phase 1 - Foundation (v0.3 CURRENT)**
 - ✅ All major compression codecs (zstd, gzip, brotli, lz4, xz, zip)
 - ✅ Interactive CLI with analysis and auto-selection
 - ✅ Public C++ API
