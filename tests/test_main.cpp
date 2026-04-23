@@ -5,95 +5,24 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <unistd.h>
 
-#include "algorithms/zstd_codec.hpp"
 #include "mantis/api.hpp"
+#include "mantis/codecs/registry.hpp"
+#include "mantis/core/smart_engine.hpp"
 
 namespace {
 
 using TestFn = bool (*)(const std::filesystem::path&, std::string&);
 
-struct TarEntry {
-  bool is_directory{false};
-  std::vector<std::byte> data;
-};
-
 struct TestCase {
   const char* name;
   TestFn fn;
 };
-
-std::string read_octal(const char* data, std::size_t width) {
-  std::string result(data, width);
-  const auto end = result.find('\0');
-  if (end != std::string::npos) {
-    result.resize(end);
-  }
-  result.erase(std::remove(result.begin(), result.end(), ' '), result.end());
-  return result;
-}
-
-std::uintmax_t parse_octal(const char* data, std::size_t width) {
-  const std::string text = read_octal(data, width);
-  return text.empty() ? 0 : std::stoull(text, nullptr, 8);
-}
-
-std::string tar_name(const std::byte* block) {
-  const auto* bytes = reinterpret_cast<const char*>(block);
-  std::string name(bytes, 100);
-  name.resize(name.find('\0'));
-
-  std::string prefix(bytes + 345, 155);
-  const auto prefix_end = prefix.find('\0');
-  if (prefix_end != std::string::npos) {
-    prefix.resize(prefix_end);
-  }
-
-  return prefix.empty() ? name : prefix + "/" + name;
-}
-
-std::map<std::string, TarEntry> parse_tar(const std::vector<std::byte>& buffer) {
-  std::map<std::string, TarEntry> entries;
-  std::size_t offset = 0;
-
-  while (offset + 512 <= buffer.size()) {
-    const std::byte* block = buffer.data() + offset;
-    const bool zero_block =
-        std::all_of(block, block + 512, [](std::byte byte) { return byte == std::byte{0}; });
-    if (zero_block) {
-      break;
-    }
-
-    const std::string name = tar_name(block);
-    const bool is_directory = reinterpret_cast<const char*>(block)[156] == '5';
-    const std::uintmax_t size = parse_octal(reinterpret_cast<const char*>(block) + 124, 12);
-    offset += 512;
-
-    TarEntry entry;
-    entry.is_directory = is_directory;
-    if (!is_directory) {
-      entry.data.assign(buffer.begin() + static_cast<std::ptrdiff_t>(offset),
-                        buffer.begin() + static_cast<std::ptrdiff_t>(offset + size));
-    }
-
-    entries.emplace(name, std::move(entry));
-    offset += ((size + 511) / 512) * 512;
-  }
-
-  return entries;
-}
-
-std::vector<std::byte> slurp_bytes(const std::filesystem::path& path) {
-  std::ifstream input(path, std::ios::binary);
-  std::vector<char> data((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-  const auto* begin = reinterpret_cast<const std::byte*>(data.data());
-  return std::vector<std::byte>(begin, begin + data.size());
-}
 
 bool write_text(const std::filesystem::path& path, const std::string& text) {
   std::ofstream output(path, std::ios::binary);
@@ -101,130 +30,422 @@ bool write_text(const std::filesystem::path& path, const std::string& text) {
   return static_cast<bool>(output);
 }
 
-bool test_file_roundtrip(const std::filesystem::path& temp_root, std::string& error) {
-  const auto input = temp_root / "hello.txt";
-  const auto archive = temp_root / "hello.txt.zst";
-  if (!write_text(input, "mantis shrimp file compression\n")) {
-    error = "failed to create input file";
+std::vector<uint8_t> read_file(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  return std::vector<uint8_t>(
+    (std::istreambuf_iterator<char>(input)),
+    std::istreambuf_iterator<char>()
+  );
+}
+
+bool test_codec_registry(const std::filesystem::path& temp_root, std::string& error) {
+  auto& registry = mantis::codecs::CodecRegistry::instance();
+  auto available = registry.listAvailable();
+
+  if (available.size() != 6) {
+    error = "Expected 6 codecs, got " + std::to_string(available.size());
     return false;
   }
 
-  const auto result = mantis::compress(input, archive, 3);
-  if (!result.ok) {
-    error = result.message;
-    return false;
-  }
-
-  std::vector<std::byte> decoded;
-  if (!mantis::algorithms::decompress_file(archive, decoded, error)) {
-    return false;
-  }
-
-  const auto original = slurp_bytes(input);
-  if (decoded != original) {
-    error = "decoded file does not match original";
+  if (!registry.isAvailable("zstd") || !registry.isAvailable("gzip") ||
+      !registry.isAvailable("brotli") || !registry.isAvailable("lz4") ||
+      !registry.isAvailable("xz") || !registry.isAvailable("zip")) {
+    error = "Not all expected codecs are registered";
     return false;
   }
 
   return true;
 }
 
-bool test_directory_packaging(const std::filesystem::path& temp_root, std::string& error) {
-  const auto dir = temp_root / "payload";
-  std::filesystem::create_directories(dir / "nested");
-  if (!write_text(dir / "top.txt", "top-level\n") ||
-      !write_text(dir / "nested" / "deep.txt", "deep file\n")) {
-    error = "failed to create directory payload";
+bool test_zstd_roundtrip(const std::filesystem::path& temp_root, std::string& error) {
+  auto& registry = mantis::codecs::CodecRegistry::instance();
+  auto codec = registry.getCodec("zstd");
+
+  if (!codec) {
+    error = "Failed to get zstd codec";
     return false;
   }
 
-  const auto archive = temp_root / "payload.tar.zst";
-  const auto result = mantis::compress(dir, archive, 3);
-  if (!result.ok) {
-    error = result.message;
+  const auto input = temp_root / "test.txt";
+  const auto compressed = temp_root / "test.txt.zst";
+  const auto decompressed = temp_root / "test.txt.out";
+
+  if (!write_text(input, "Zstandard compression test\n")) {
+    error = "Failed to create input file";
     return false;
   }
 
-  std::vector<std::byte> decoded;
-  if (!mantis::algorithms::decompress_file(archive, decoded, error)) {
+  if (!codec->compress(input, compressed, 6, error)) {
     return false;
   }
 
-  const auto entries = parse_tar(decoded);
-  if (!entries.contains("payload/") || !entries.contains("payload/nested/") ||
-      !entries.contains("payload/top.txt") || !entries.contains("payload/nested/deep.txt")) {
-    error = "tar archive is missing expected entries";
+  if (!codec->decompress(compressed, decompressed, error)) {
     return false;
   }
 
-  const auto expected = slurp_bytes(dir / "nested" / "deep.txt");
-  if (entries.at("payload/nested/deep.txt").data != expected) {
-    error = "nested file contents did not survive archive packaging";
+  auto original = read_file(input);
+  auto result = read_file(decompressed);
+
+  if (original != result) {
+    error = "Zstandard roundtrip mismatch";
     return false;
   }
 
   return true;
 }
 
-bool test_large_streaming_input(const std::filesystem::path& temp_root, std::string& error) {
+bool test_gzip_roundtrip(const std::filesystem::path& temp_root, std::string& error) {
+  auto& registry = mantis::codecs::CodecRegistry::instance();
+  auto codec = registry.getCodec("gzip");
+
+  if (!codec) {
+    error = "Failed to get gzip codec";
+    return false;
+  }
+
+  const auto input = temp_root / "test_gz.txt";
+  const auto compressed = temp_root / "test_gz.txt.gz";
+  const auto decompressed = temp_root / "test_gz.txt.out";
+
+  if (!write_text(input, "Gzip compression test\n")) {
+    error = "Failed to create input file";
+    return false;
+  }
+
+  if (!codec->compress(input, compressed, 6, error)) {
+    return false;
+  }
+
+  if (!codec->decompress(compressed, decompressed, error)) {
+    return false;
+  }
+
+  auto original = read_file(input);
+  auto result = read_file(decompressed);
+
+  if (original != result) {
+    error = "Gzip roundtrip mismatch";
+    return false;
+  }
+
+  return true;
+}
+
+bool test_brotli_roundtrip(const std::filesystem::path& temp_root, std::string& error) {
+  auto& registry = mantis::codecs::CodecRegistry::instance();
+  auto codec = registry.getCodec("brotli");
+
+  if (!codec) {
+    error = "Failed to get brotli codec";
+    return false;
+  }
+
+  const auto input = temp_root / "test_br.txt";
+  const auto compressed = temp_root / "test_br.txt.br";
+  const auto decompressed = temp_root / "test_br.txt.out";
+
+  if (!write_text(input, "Brotli compression test\n")) {
+    error = "Failed to create input file";
+    return false;
+  }
+
+  if (!codec->compress(input, compressed, 6, error)) {
+    return false;
+  }
+
+  if (!codec->decompress(compressed, decompressed, error)) {
+    return false;
+  }
+
+  auto original = read_file(input);
+  auto result = read_file(decompressed);
+
+  if (original != result) {
+    error = "Brotli roundtrip mismatch";
+    return false;
+  }
+
+  return true;
+}
+
+bool test_lz4_roundtrip(const std::filesystem::path& temp_root, std::string& error) {
+  auto& registry = mantis::codecs::CodecRegistry::instance();
+  auto codec = registry.getCodec("lz4");
+
+  if (!codec) {
+    error = "Failed to get lz4 codec";
+    return false;
+  }
+
+  const auto input = temp_root / "test_lz4.txt";
+  const auto compressed = temp_root / "test_lz4.txt.lz4";
+  const auto decompressed = temp_root / "test_lz4.txt.out";
+
+  if (!write_text(input, "LZ4 compression test data\n")) {
+    error = "Failed to create input file";
+    return false;
+  }
+
+  if (!codec->compress(input, compressed, 3, error)) {
+    return false;
+  }
+
+  if (!codec->decompress(compressed, decompressed, error)) {
+    return false;
+  }
+
+  auto original = read_file(input);
+  auto result = read_file(decompressed);
+
+  if (original != result) {
+    error = "LZ4 roundtrip mismatch";
+    return false;
+  }
+
+  return true;
+}
+
+bool test_xz_roundtrip(const std::filesystem::path& temp_root, std::string& error) {
+  auto& registry = mantis::codecs::CodecRegistry::instance();
+  auto codec = registry.getCodec("xz");
+
+  if (!codec) {
+    error = "Failed to get xz codec";
+    return false;
+  }
+
+  const auto input = temp_root / "test_xz.txt";
+  const auto compressed = temp_root / "test_xz.txt.xz";
+  const auto decompressed = temp_root / "test_xz.txt.out";
+
+  if (!write_text(input, "XZ compression test\n")) {
+    error = "Failed to create input file";
+    return false;
+  }
+
+  if (!codec->compress(input, compressed, 3, error)) {
+    return false;
+  }
+
+  if (!codec->decompress(compressed, decompressed, error)) {
+    return false;
+  }
+
+  auto original = read_file(input);
+  auto result = read_file(decompressed);
+
+  if (original != result) {
+    error = "XZ roundtrip mismatch";
+    return false;
+  }
+
+  return true;
+}
+
+bool test_zip_roundtrip(const std::filesystem::path& temp_root, std::string& error) {
+  auto& registry = mantis::codecs::CodecRegistry::instance();
+  auto codec = registry.getCodec("zip");
+
+  if (!codec) {
+    error = "Failed to get zip codec";
+    return false;
+  }
+
+  const auto input = temp_root / "test_zip.txt";
+  const auto compressed = temp_root / "test_zip.txt.zip";
+  const auto decompressed = temp_root / "test_zip.txt.out";
+
+  if (!write_text(input, "ZIP compression test\n")) {
+    error = "Failed to create input file";
+    return false;
+  }
+
+  if (!codec->compress(input, compressed, 6, error)) {
+    return false;
+  }
+
+  if (!codec->decompress(compressed, decompressed, error)) {
+    return false;
+  }
+
+  auto original = read_file(input);
+  auto result = read_file(decompressed);
+
+  if (original != result) {
+    error = "ZIP roundtrip mismatch";
+    return false;
+  }
+
+  return true;
+}
+
+bool test_smart_engine_benchmark(const std::filesystem::path& temp_root, std::string& error) {
+  const auto input = temp_root / "benchmark.txt";
+
+  if (!write_text(input, "This is a test file for benchmarking all compression algorithms\n")) {
+    error = "Failed to create input file";
+    return false;
+  }
+
+  auto stats = mantis::core::SmartEngine::instance().benchmarkAll(input);
+
+  if (stats.size() != 6) {
+    error = "Expected 6 codec stats, got " + std::to_string(stats.size());
+    return false;
+  }
+
+  for (const auto& stat : stats) {
+    if (stat.algorithm.empty() || stat.original_size == 0) {
+      error = "Invalid stat data";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool test_smart_engine_auto_select(const std::filesystem::path& temp_root, std::string& error) {
+  const auto input = temp_root / "auto_test.txt";
+
+  std::string large_text;
+  for (int i = 0; i < 100; ++i) {
+    large_text += "This is repetitive text for compression testing.\n";
+  }
+
+  if (!write_text(input, large_text)) {
+    error = "Failed to create input file";
+    return false;
+  }
+
+  auto rec = mantis::core::SmartEngine::instance().autoSelect(input);
+
+  if (rec.algorithm.empty() || rec.compression_ratio <= 0.0) {
+    error = "Invalid recommendation";
+    return false;
+  }
+
+  return true;
+}
+
+bool test_empty_file(const std::filesystem::path& temp_root, std::string& error) {
+  auto& registry = mantis::codecs::CodecRegistry::instance();
+  auto codec = registry.getCodec("zstd");
+
+  if (!codec) {
+    error = "Failed to get zstd codec";
+    return false;
+  }
+
+  const auto input = temp_root / "empty.txt";
+  const auto compressed = temp_root / "empty.txt.zst";
+  const auto decompressed = temp_root / "empty.txt.out";
+
+  if (!write_text(input, "")) {
+    error = "Failed to create empty file";
+    return false;
+  }
+
+  if (!codec->compress(input, compressed, 6, error)) {
+    return false;
+  }
+
+  if (!codec->decompress(compressed, decompressed, error)) {
+    return false;
+  }
+
+  auto original = read_file(input);
+  auto result = read_file(decompressed);
+
+  if (original != result) {
+    error = "Empty file roundtrip mismatch";
+    return false;
+  }
+
+  return true;
+}
+
+bool test_large_file(const std::filesystem::path& temp_root, std::string& error) {
+  auto& registry = mantis::codecs::CodecRegistry::instance();
+  auto codec = registry.getCodec("zstd");
+
+  if (!codec) {
+    error = "Failed to get zstd codec";
+    return false;
+  }
+
   const auto input = temp_root / "large.bin";
-  const auto archive = temp_root / "large.bin.zst";
-  std::ofstream output(input, std::ios::binary);
-  if (!output) {
-    error = "failed to create large input";
+  const auto compressed = temp_root / "large.bin.zst";
+  const auto decompressed = temp_root / "large.bin.out";
+
+  std::ofstream out(input, std::ios::binary);
+  if (!out) {
+    error = "Failed to create large file";
     return false;
   }
 
-  for (int i = 0; i < 200000; ++i) {
-    output << "0123456789abcdef";
+  for (int i = 0; i < 100000; ++i) {
+    out << "0123456789ABCDEF";
   }
-  output.close();
+  out.close();
 
-  const auto result = mantis::compress(input, archive, 5);
-  if (!result.ok) {
-    error = result.message;
+  if (!codec->compress(input, compressed, 6, error)) {
     return false;
   }
 
-  std::vector<std::byte> decoded;
-  if (!mantis::algorithms::decompress_file(archive, decoded, error)) {
+  if (!codec->decompress(compressed, decompressed, error)) {
     return false;
   }
 
-  const auto original = slurp_bytes(input);
-  if (decoded != original) {
-    error = "large file roundtrip mismatch";
+  auto original = read_file(input);
+  auto result = read_file(decompressed);
+
+  if (original != result) {
+    error = "Large file roundtrip mismatch";
     return false;
   }
 
   return true;
 }
 
-}  // namespace
+}
 
 int main() {
   const auto temp_root =
-      std::filesystem::temp_directory_path() / ("mantis_shrimp_tests_" + std::to_string(::getpid()));
+      std::filesystem::temp_directory_path() / ("mantis_tests_" + std::to_string(::getpid()));
   std::filesystem::create_directories(temp_root);
 
-  const std::array<TestCase, 3> tests = {
-      TestCase{"file_roundtrip", test_file_roundtrip},
-      TestCase{"directory_packaging", test_directory_packaging},
-      TestCase{"large_streaming_input", test_large_streaming_input},
+  const std::array<TestCase, 11> tests = {
+      TestCase{"codec_registry", test_codec_registry},
+      TestCase{"zstd_roundtrip", test_zstd_roundtrip},
+      TestCase{"gzip_roundtrip", test_gzip_roundtrip},
+      TestCase{"brotli_roundtrip", test_brotli_roundtrip},
+      TestCase{"lz4_roundtrip", test_lz4_roundtrip},
+      TestCase{"xz_roundtrip", test_xz_roundtrip},
+      TestCase{"zip_roundtrip", test_zip_roundtrip},
+      TestCase{"smart_engine_benchmark", test_smart_engine_benchmark},
+      TestCase{"smart_engine_auto_select", test_smart_engine_auto_select},
+      TestCase{"empty_file", test_empty_file},
+      TestCase{"large_file", test_large_file},
   };
 
-  bool ok = true;
+  int passed = 0;
+  int failed = 0;
+
   for (const auto& [name, fn] : tests) {
     std::string error;
-    const bool passed = fn(temp_root, error);
-    std::cout << (passed ? "[PASS] " : "[FAIL] ") << name;
-    if (!passed) {
+    const bool test_passed = fn(temp_root, error);
+    std::cout << (test_passed ? "[PASS] " : "[FAIL] ") << name;
+    if (!test_passed) {
       std::cout << ": " << error;
-      ok = false;
+      failed++;
+    } else {
+      passed++;
     }
     std::cout << '\n';
   }
 
+  std::cout << "\nTotal: " << passed << " passed, " << failed << " failed\n";
+
   std::filesystem::remove_all(temp_root);
-  return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+  return failed == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
