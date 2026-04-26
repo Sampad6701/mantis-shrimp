@@ -407,14 +407,115 @@ bool test_large_file(const std::filesystem::path& temp_root, std::string& error)
   return true;
 }
 
+bool test_directory_extract_roundtrip(const std::filesystem::path& temp_root, std::string& error) {
+  const auto input_dir = temp_root / "roundtrip_dir";
+  const auto nested_dir = input_dir / "nested";
+  const auto archive = temp_root / "roundtrip_dir.tar.zst";
+  const auto extract_dir = temp_root / "extract";
+
+  std::error_code ec;
+  std::filesystem::create_directories(nested_dir, ec);
+  if (ec) {
+    error = "Failed to create input directory";
+    return false;
+  }
+
+  if (!write_text(input_dir / "root.txt", "root file\n") ||
+      !write_text(nested_dir / "child.txt", "nested file\n")) {
+    error = "Failed to create directory test files";
+    return false;
+  }
+
+  ec.clear();
+  std::filesystem::create_symlink("root.txt", input_dir / "root_link.txt", ec);
+  const bool created_symlink = !ec;
+
+  const auto compressed = mantis::compress(input_dir, archive, 6, "zstd");
+  if (!compressed.ok) {
+    error = compressed.message;
+    return false;
+  }
+
+  const auto extracted = mantis::extract(archive, extract_dir);
+  if (!extracted.ok) {
+    error = extracted.message;
+    return false;
+  }
+
+  if (read_file(input_dir / "root.txt") != read_file(extract_dir / "root.txt") ||
+      read_file(nested_dir / "child.txt") != read_file(extract_dir / "nested" / "child.txt")) {
+    error = "Directory extract roundtrip mismatch";
+    return false;
+  }
+
+  if (created_symlink) {
+    const auto extracted_link = extract_dir / "root_link.txt";
+    if (!std::filesystem::is_symlink(extracted_link)) {
+      error = "Extracted symlink was not restored";
+      return false;
+    }
+    if (std::filesystem::read_symlink(extracted_link) != std::filesystem::path{"root.txt"}) {
+      error = "Extracted symlink target mismatch";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool test_zip_directory_roundtrip(const std::filesystem::path& temp_root, std::string& error) {
+  auto& registry = mantis::codecs::CodecRegistry::instance();
+  auto codec = registry.getCodec("zip");
+
+  if (!codec) {
+    error = "Failed to get zip codec";
+    return false;
+  }
+
+  const auto input_dir = temp_root / "zip_dir";
+  const auto nested_dir = input_dir / "nested";
+  const auto archive = temp_root / "zip_dir.zip";
+  const auto extract_dir = temp_root / "zip_extract";
+
+  std::error_code ec;
+  std::filesystem::create_directories(nested_dir, ec);
+  if (ec) {
+    error = "Failed to create zip directory fixture";
+    return false;
+  }
+
+  if (!write_text(input_dir / "root.txt", "zip root\n") ||
+      !write_text(nested_dir / "child.txt", "zip child\n")) {
+    error = "Failed to create zip directory files";
+    return false;
+  }
+
+  if (!codec->compress(input_dir, archive, 6, error)) {
+    return false;
+  }
+
+  if (!codec->decompress(archive, extract_dir, error)) {
+    return false;
+  }
+
+  if (read_file(input_dir / "root.txt") != read_file(extract_dir / "root.txt") ||
+      read_file(nested_dir / "child.txt") != read_file(extract_dir / "nested" / "child.txt")) {
+    error = "ZIP directory roundtrip mismatch";
+    return false;
+  }
+
+  return true;
+}
+
 }
 
 int main() {
   const auto temp_root =
       std::filesystem::temp_directory_path() / ("mantis_tests_" + std::to_string(::getpid()));
+  std::filesystem::remove_all(temp_root);
   std::filesystem::create_directories(temp_root);
 
-  const std::array<TestCase, 11> tests = {
+  const std::array<TestCase, 13> tests = {
       TestCase{"codec_registry", test_codec_registry},
       TestCase{"zstd_roundtrip", test_zstd_roundtrip},
       TestCase{"gzip_roundtrip", test_gzip_roundtrip},
@@ -426,6 +527,8 @@ int main() {
       TestCase{"smart_engine_auto_select", test_smart_engine_auto_select},
       TestCase{"empty_file", test_empty_file},
       TestCase{"large_file", test_large_file},
+      TestCase{"directory_extract_roundtrip", test_directory_extract_roundtrip},
+      TestCase{"zip_directory_roundtrip", test_zip_directory_roundtrip},
   };
 
   int passed = 0;

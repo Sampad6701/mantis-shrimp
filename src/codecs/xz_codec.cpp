@@ -11,6 +11,16 @@ bool XzCodec::compress(
     int level,
     std::string& error
 ) {
+    return compress(input, output, level, 1, error);
+}
+
+bool XzCodec::compress(
+    const fs::path& input,
+    const fs::path& output,
+    int level,
+    int threads,
+    std::string& error
+) {
     try {
         std::ifstream in(input, std::ios::binary);
         if (!in) {
@@ -23,6 +33,58 @@ bool XzCodec::compress(
             std::istreambuf_iterator<char>()
         );
         in.close();
+
+        if (threads > 1) {
+            std::ofstream out(output, std::ios::binary);
+            if (!out) {
+                error = "Failed to open output file";
+                return false;
+            }
+
+            lzma_mt mt{};
+            mt.threads = static_cast<uint32_t>(threads);
+            mt.block_size = 0;
+            mt.timeout = 0;
+            mt.preset = static_cast<uint32_t>(level);
+            mt.filters = nullptr;
+            mt.check = LZMA_CHECK_CRC64;
+
+            lzma_stream stream = LZMA_STREAM_INIT;
+            lzma_ret ret = lzma_stream_encoder_mt(&stream, &mt);
+            if (ret != LZMA_OK) {
+                error = "Failed to initialize threaded LZMA encoder";
+                return false;
+            }
+
+            std::vector<uint8_t> out_buffer(64 * 1024);
+            stream.next_in = input_buffer.data();
+            stream.avail_in = input_buffer.size();
+
+            do {
+                stream.next_out = out_buffer.data();
+                stream.avail_out = out_buffer.size();
+
+                ret = lzma_code(&stream, LZMA_FINISH);
+                if (ret != LZMA_OK && ret != LZMA_STREAM_END) {
+                    lzma_end(&stream);
+                    error = "LZMA threaded compression failed";
+                    return false;
+                }
+
+                const size_t produced = out_buffer.size() - stream.avail_out;
+                if (produced > 0) {
+                    out.write(reinterpret_cast<const char*>(out_buffer.data()), produced);
+                    if (!out) {
+                        lzma_end(&stream);
+                        error = "Failed to write output file";
+                        return false;
+                    }
+                }
+            } while (ret != LZMA_STREAM_END);
+
+            lzma_end(&stream);
+            return true;
+        }
 
         std::vector<uint8_t> compressed_buffer(
             lzma_stream_buffer_bound(input_buffer.size())
@@ -79,46 +141,39 @@ bool XzCodec::decompress(
         );
         in.close();
 
-        uint64_t memlimit = UINT64_MAX;
-        size_t output_capacity = std::max<size_t>(compressed_buffer.size() * 4, 1024);
         std::vector<uint8_t> decompressed_buffer;
-        lzma_ret ret = LZMA_OK;
+        std::vector<uint8_t> out_chunk(64 * 1024);
 
-        for (int attempt = 0; attempt < 10; ++attempt) {
-            decompressed_buffer.assign(output_capacity, 0);
-            size_t in_pos = 0;
-            size_t out_pos = 0;
-
-            ret = lzma_stream_buffer_decode(
-                &memlimit,
-                0,
-                nullptr,
-                compressed_buffer.data(),
-                &in_pos,
-                compressed_buffer.size(),
-                decompressed_buffer.data(),
-                &out_pos,
-                decompressed_buffer.size()
-            );
-
-            if (ret == LZMA_OK) {
-                decompressed_buffer.resize(out_pos);
-                break;
-            }
-
-            if (ret == LZMA_BUF_ERROR && in_pos == compressed_buffer.size() && out_pos == decompressed_buffer.size()) {
-                output_capacity *= 2;
-                continue;
-            }
-
-            error = "LZMA decompression failed";
-            return false;
-        }
-
+        lzma_stream stream = LZMA_STREAM_INIT;
+        lzma_ret ret = lzma_stream_decoder(&stream, UINT64_MAX, 0);
         if (ret != LZMA_OK) {
-            error = "LZMA decompression failed (output buffer exhausted)";
+            error = "Failed to initialize LZMA decompressor";
             return false;
         }
+
+        stream.next_in = compressed_buffer.data();
+        stream.avail_in = compressed_buffer.size();
+
+        do {
+            stream.next_out = out_chunk.data();
+            stream.avail_out = out_chunk.size();
+
+            ret = lzma_code(&stream, LZMA_FINISH);
+            if (ret != LZMA_OK && ret != LZMA_STREAM_END) {
+                lzma_end(&stream);
+                error = "LZMA decompression failed";
+                return false;
+            }
+
+            const size_t produced = out_chunk.size() - stream.avail_out;
+            decompressed_buffer.insert(
+                decompressed_buffer.end(),
+                out_chunk.data(),
+                out_chunk.data() + produced
+            );
+        } while (ret != LZMA_STREAM_END);
+
+        lzma_end(&stream);
 
         std::ofstream out(output, std::ios::binary);
         if (!out) {

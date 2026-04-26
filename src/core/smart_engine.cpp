@@ -10,8 +10,8 @@ SmartEngine& SmartEngine::instance() {
 
 SmartEngine::SmartEngine() : registry_(mantis::codecs::CodecRegistry::instance()) {}
 
-CompressionRecommendation SmartEngine::autoSelect(const fs::path& input) {
-    auto stats = benchmarkAll(input);
+CompressionRecommendation SmartEngine::autoSelect(const fs::path& input, int compression_level) {
+    auto stats = benchmarkAll(input, compression_level);
 
     if (stats.empty()) {
         return {"zstd", 0.0, 0, "Default (no codecs available)"};
@@ -34,14 +34,15 @@ CompressionRecommendation SmartEngine::autoSelect(const fs::path& input) {
 }
 
 std::vector<mantis::codecs::CompressionStats> SmartEngine::benchmarkAll(
-    const fs::path& input
+    const fs::path& input,
+    int compression_level
 ) {
     std::vector<mantis::codecs::CompressionStats> results;
 
     for (const auto& codec_name : listCodecs()) {
         auto codec = registry_.getCodec(codec_name);
         if (codec) {
-            results.push_back(codec->stats(input, 6));
+            results.push_back(codec->stats(input, compression_level));
         }
     }
 

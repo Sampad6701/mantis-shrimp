@@ -5,6 +5,61 @@
 
 namespace mantis::codecs {
 
+namespace {
+
+bool add_zip_file(zip_t* archive,
+                  const fs::path& disk_path,
+                  const std::string& entry_name,
+                  int level,
+                  std::string& error) {
+    zip_source_t* source = zip_source_file(
+        archive,
+        disk_path.string().c_str(),
+        0,
+        0
+    );
+
+    if (!source) {
+        error = "Failed to create ZIP source";
+        return false;
+    }
+
+    const zip_int64_t index = zip_file_add(archive, entry_name.c_str(), source, ZIP_FL_OVERWRITE);
+    if (index < 0) {
+        error = "Failed to add file to ZIP archive";
+        zip_source_free(source);
+        return false;
+    }
+
+    zip_set_file_compression(archive, static_cast<zip_uint64_t>(index), ZIP_CM_DEFLATE, level);
+    return true;
+}
+
+bool add_zip_directory(zip_t* archive,
+                       const std::string& entry_name,
+                       std::string& error) {
+    if (zip_dir_add(archive, entry_name.c_str(), ZIP_FL_ENC_UTF_8) < 0) {
+        error = "Failed to add directory to ZIP archive";
+        return false;
+    }
+    return true;
+}
+
+fs::path strip_first_component(const fs::path& path) {
+    fs::path stripped;
+    bool skipped_first = false;
+    for (const auto& part : path) {
+        if (!skipped_first) {
+            skipped_first = true;
+            continue;
+        }
+        stripped /= part;
+    }
+    return stripped;
+}
+
+}
+
 bool ZipCodec::compress(
     const fs::path& input,
     const fs::path& output,
@@ -22,27 +77,62 @@ bool ZipCodec::compress(
 
         if (fs::is_regular_file(input)) {
             std::string entry_name = input.filename().string();
-            zip_source_t* source = zip_source_file(
-                archive,
-                input.string().c_str(),
-                0,
-                0
-            );
-
-            if (!source) {
-                error = "Failed to create ZIP source";
+            if (!add_zip_file(archive, input, entry_name, level, error)) {
+                zip_close(archive);
+                return false;
+            }
+        } else if (fs::is_directory(input)) {
+            const auto root_name = input.filename();
+            if (root_name.empty()) {
+                error = "Directory must have a name";
                 zip_close(archive);
                 return false;
             }
 
-            if (zip_file_add(archive, entry_name.c_str(), source, ZIP_FL_OVERWRITE) < 0) {
-                error = "Failed to add file to ZIP archive";
-                zip_source_free(source);
+            if (!add_zip_directory(archive, root_name.generic_string() + "/", error)) {
                 zip_close(archive);
                 return false;
             }
 
-            zip_set_file_compression(archive, 0, ZIP_CM_DEFLATE, level);
+            std::error_code ec;
+            for (const auto& entry : fs::recursive_directory_iterator(input)) {
+                const auto relative = entry.path().lexically_relative(input);
+                if (relative.empty()) {
+                    error = "Failed to compute ZIP entry path";
+                    zip_close(archive);
+                    return false;
+                }
+
+                const auto archive_path = (root_name / relative).generic_string();
+                if (entry.is_symlink(ec)) {
+                    error = "ZIP symlink entries are not supported yet";
+                    zip_close(archive);
+                    return false;
+                }
+
+                if (entry.is_directory(ec)) {
+                    if (!add_zip_directory(archive, archive_path + "/", error)) {
+                        zip_close(archive);
+                        return false;
+                    }
+                    continue;
+                }
+
+                if (!entry.is_regular_file(ec)) {
+                    error = "Unsupported entry in directory tree";
+                    zip_close(archive);
+                    return false;
+                }
+
+                if (!add_zip_file(archive, entry.path(), archive_path, level, error)) {
+                    zip_close(archive);
+                    return false;
+                }
+            }
+        } else {
+            error = "Unsupported input type for ZIP archive";
+            zip_close(archive);
+            return false;
         }
 
         if (zip_close(archive) != 0) {
@@ -115,7 +205,14 @@ bool ZipCodec::decompress(
                     entry_path = output;
                 }
             } else {
-                entry_path = base_output_dir / entry_name;
+                fs::path relative_entry = entry_name;
+                if (!output.empty()) {
+                    relative_entry = strip_first_component(relative_entry);
+                    if (relative_entry.empty()) {
+                        continue;
+                    }
+                }
+                entry_path = base_output_dir / relative_entry;
             }
 
             std::error_code ec;
