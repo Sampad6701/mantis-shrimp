@@ -336,30 +336,6 @@ mantis-shrimp/
 └── CHANGELOG.md
 ```
 
-## Development Roadmap
-
-**Phase 1 - Foundation (v0.3)**
-
-- ✅ All major compression codecs (zstd, gzip, brotli, lz4, xz, zip)
-- ✅ Interactive CLI with analysis and auto-selection
-- ✅ Public C++ API
-- ✅ Smart benchmarking engine
-
-**Phase 2 - Polish & Stability (v0.4 CURRENT)**
-
-- 🔄 Enhanced error handling and edge cases
-- 🔄 Performance optimization
-- 🔄 Comprehensive test coverage
-- 🔄 GUI wrapper (planned)
-
-**Phase 3 - Integration (v0.6+)**
-
-- ⏳ Context menu integration
-- ⏳ Custom codec plugins
-- ⏳ Cloud streaming support
-
-**Stability Target for Production: v1.0**
-
 ## License
 
 See LICENSE file for details.
