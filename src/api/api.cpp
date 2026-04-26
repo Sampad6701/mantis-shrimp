@@ -4,8 +4,8 @@
 
 namespace mantis {
 
-Analysis analyze(const std::filesystem::path& path) {
-  return core::Engine{}.analyze(path);
+Analysis analyze(const std::filesystem::path& path, int compression_level) {
+  return core::Engine{}.analyze(path, compression_level);
 }
 
 OperationResult compress(const std::filesystem::path& path,

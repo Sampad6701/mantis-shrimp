@@ -21,6 +21,9 @@ class TarWriter {
   Sink sink_;
 
   bool add_directory_entry(const std::string& archive_name, std::string& error);
+  bool add_symlink_entry(const std::string& archive_name,
+                         const std::filesystem::path& link_target,
+                         std::string& error);
   bool add_file_entry(const std::filesystem::path& disk_path,
                       const std::string& archive_name,
                       std::string& error);

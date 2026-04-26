@@ -65,9 +65,10 @@ bool split_name(const std::string& input, PosixHeader& header, std::string& erro
 }
 
 bool make_header(const std::string& archive_name,
-                 bool is_directory,
+                 char typeflag,
                  std::uintmax_t size,
                  std::time_t mtime,
+                 std::string_view link_target,
                  std::array<std::byte, kTarBlockSize>& block,
                  std::string& error) {
   block.fill(std::byte{0});
@@ -77,15 +78,23 @@ bool make_header(const std::string& archive_name,
     return false;
   }
 
+  if (link_target.size() > sizeof(header->linkname)) {
+    error = "symlink target too long for tar header: " + std::string(link_target);
+    return false;
+  }
+
   std::memcpy(header->magic, "ustar", 5);
   std::memcpy(header->version, "00", 2);
-  write_octal(header->mode, sizeof(header->mode), is_directory ? 0755 : 0644);
+  write_octal(header->mode, sizeof(header->mode), typeflag == '5' ? 0755 : 0644);
   write_octal(header->uid, sizeof(header->uid), 0);
   write_octal(header->gid, sizeof(header->gid), 0);
-  write_octal(header->size, sizeof(header->size), is_directory ? 0 : size);
+  write_octal(header->size, sizeof(header->size), typeflag == '0' ? size : 0);
   write_octal(header->mtime, sizeof(header->mtime), static_cast<std::uintmax_t>(mtime));
   std::memset(header->checksum, ' ', sizeof(header->checksum));
-  header->typeflag = is_directory ? '5' : '0';
+  header->typeflag = typeflag;
+  if (!link_target.empty()) {
+    std::memcpy(header->linkname, link_target.data(), link_target.size());
+  }
 
   unsigned int checksum = 0;
   for (const std::byte byte : block) {
@@ -127,18 +136,25 @@ bool TarWriter::add_directory_tree(const std::filesystem::path& root, std::strin
   }
 
   for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
-    if (entry.is_symlink(ec)) {
-      error = "symlinks are not supported in v0.1";
-      return false;
-    }
-
-    const auto relative = std::filesystem::relative(entry.path(), root, ec);
-    if (ec) {
+    const auto relative = entry.path().lexically_relative(root);
+    if (relative.empty()) {
       error = "failed to compute archive path";
       return false;
     }
 
     const auto archive_name = normalize_tar_path(root_name / relative);
+    if (entry.is_symlink(ec)) {
+      const auto link_target = std::filesystem::read_symlink(entry.path(), ec);
+      if (ec) {
+        error = "failed to read symlink target";
+        return false;
+      }
+      if (!add_symlink_entry(archive_name, link_target, error)) {
+        return false;
+      }
+      continue;
+    }
+
     if (entry.is_directory(ec)) {
       if (!add_directory_entry(archive_name + "/", error)) {
         return false;
@@ -166,7 +182,19 @@ bool TarWriter::finish(std::string& error) {
 
 bool TarWriter::add_directory_entry(const std::string& archive_name, std::string& error) {
   std::array<std::byte, kTarBlockSize> block{};
-  if (!make_header(archive_name, true, 0, std::time(nullptr), block, error)) {
+  if (!make_header(archive_name, '5', 0, std::time(nullptr), {}, block, error)) {
+    return false;
+  }
+
+  return write_block(block.data(), block.size(), error);
+}
+
+bool TarWriter::add_symlink_entry(const std::string& archive_name,
+                                  const std::filesystem::path& link_target,
+                                  std::string& error) {
+  std::array<std::byte, kTarBlockSize> block{};
+  const std::string normalized_target = normalize_tar_path(link_target);
+  if (!make_header(archive_name, '2', 0, std::time(nullptr), normalized_target, block, error)) {
     return false;
   }
 
@@ -189,7 +217,7 @@ bool TarWriter::add_file_entry(const std::filesystem::path& disk_path,
   }
 
   std::array<std::byte, kTarBlockSize> block{};
-  if (!make_header(archive_name, false, file_size, to_time_t(modified), block, error)) {
+  if (!make_header(archive_name, '0', file_size, to_time_t(modified), {}, block, error)) {
     return false;
   }
 

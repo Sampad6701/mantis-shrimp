@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -13,16 +14,15 @@
 #include <system_error>
 #include <vector>
 
-#include "algorithms/gzip_codec.hpp"
-#include "algorithms/zstd_codec.hpp"
 #include "archive/tar_writer.hpp"
+#include "codecs/gzip_codec.hpp"
+#include "codecs/zstd_codec.hpp"
 
 namespace mantis::core {
 
 namespace {
 
 constexpr std::size_t kStreamChunkSize = 64 * 1024;
-constexpr int kBenchmarkCompressionLevel = 3;
 
 enum class CompressionAlgorithm {
   Auto,
@@ -151,6 +151,221 @@ std::uintmax_t benchmark_size_for(std::span<const BenchmarkResult> results,
     return result.algorithm == algorithm;
   });
   return it != results.end() ? it->bytes : 0;
+}
+
+bool has_suffix(std::string_view value, std::string_view suffix) {
+  return value.size() >= suffix.size() &&
+         value.substr(value.size() - suffix.size()) == suffix;
+}
+
+std::uintmax_t parse_tar_octal(const char* value, std::size_t size) {
+  std::uintmax_t result = 0;
+  for (std::size_t index = 0; index < size; ++index) {
+    const char ch = value[index];
+    if (ch == '\0' || ch == ' ') {
+      break;
+    }
+    if (ch < '0' || ch > '7') {
+      continue;
+    }
+    result = (result * 8) + static_cast<std::uintmax_t>(ch - '0');
+  }
+  return result;
+}
+
+bool is_zero_block(std::span<const std::byte> block) {
+  return std::all_of(block.begin(), block.end(), [](std::byte value) {
+    return value == std::byte{0};
+  });
+}
+
+std::string tar_string_field(const char* value, std::size_t size) {
+  const auto* end = static_cast<const char*>(std::memchr(value, '\0', size));
+  return std::string(value, end == nullptr ? size : static_cast<std::size_t>(end - value));
+}
+
+bool is_safe_archive_path(const std::filesystem::path& path) {
+  if (path.empty() || path.is_absolute()) {
+    return false;
+  }
+
+  for (const auto& part : path) {
+    if (part == "..") {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+std::filesystem::path remove_first_path_component(const std::filesystem::path& path) {
+  std::filesystem::path stripped;
+  bool skipped_first = false;
+  for (const auto& part : path) {
+    if (!skipped_first) {
+      skipped_first = true;
+      continue;
+    }
+    stripped /= part;
+  }
+  return stripped;
+}
+
+bool read_file_bytes(const std::filesystem::path& path,
+                     std::vector<std::byte>& output,
+                     std::string& error) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    error = "failed to open archive";
+    return false;
+  }
+
+  std::array<char, kStreamChunkSize> buffer{};
+  while (input) {
+    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize read_count = input.gcount();
+    if (read_count <= 0) {
+      break;
+    }
+
+    const auto* begin = reinterpret_cast<const std::byte*>(buffer.data());
+    output.insert(output.end(), begin, begin + read_count);
+  }
+
+  if (!input.eof() && input.fail()) {
+    error = "failed while reading archive";
+    return false;
+  }
+
+  return true;
+}
+
+bool decode_archive_stream(const std::filesystem::path& archive_path,
+                           std::vector<std::byte>& output,
+                           std::string& algorithm,
+                           std::string& error) {
+  const std::string path = archive_path.string();
+  if (has_suffix(path, ".zst")) {
+    algorithm = "zstd";
+    return codecs::decompress_zstd_file(archive_path, output, error);
+  }
+  if (has_suffix(path, ".gz")) {
+    algorithm = "gzip";
+    return codecs::decompress_gzip_file(archive_path, output, error);
+  }
+  if (has_suffix(path, ".tar")) {
+    algorithm = "store";
+    return read_file_bytes(archive_path, output, error);
+  }
+
+  error = "unsupported archive extension; expected .tar.zst, .tar.gz, or .tar";
+  return false;
+}
+
+bool extract_tar_stream(std::span<const std::byte> tar_data,
+                        const std::filesystem::path& destination,
+                        std::string& error) {
+  constexpr std::size_t kTarBlockSize = 512;
+  const std::filesystem::path base = destination.empty() ? std::filesystem::path{"."} : destination;
+  const bool strip_archive_root = !destination.empty();
+
+  std::error_code ec;
+  std::filesystem::create_directories(base, ec);
+  if (ec) {
+    error = "failed to create output directory: " + ec.message();
+    return false;
+  }
+
+  std::size_t offset = 0;
+  while (offset + kTarBlockSize <= tar_data.size()) {
+    const auto block = tar_data.subspan(offset, kTarBlockSize);
+    if (is_zero_block(block)) {
+      return true;
+    }
+
+    const auto* header = reinterpret_cast<const char*>(block.data());
+    const std::string name = tar_string_field(header, 100);
+    const std::string link_target = tar_string_field(header + 157, 100);
+    const std::string prefix = tar_string_field(header + 345, 155);
+    const std::filesystem::path archive_path = prefix.empty() ? std::filesystem::path{name}
+                                                              : std::filesystem::path{prefix} / name;
+    const char typeflag = header[156];
+    const std::uintmax_t file_size = parse_tar_octal(header + 124, 12);
+
+    if (!is_safe_archive_path(archive_path)) {
+      error = "unsafe archive path: " + archive_path.string();
+      return false;
+    }
+
+    offset += kTarBlockSize;
+    if (offset + file_size > tar_data.size()) {
+      error = "tar archive ended unexpectedly";
+      return false;
+    }
+
+    const std::filesystem::path relative_output_path =
+        strip_archive_root ? remove_first_path_component(archive_path) : archive_path;
+    if (relative_output_path.empty()) {
+      const std::size_t padding = (kTarBlockSize - (file_size % kTarBlockSize)) % kTarBlockSize;
+      offset += static_cast<std::size_t>(file_size) + padding;
+      continue;
+    }
+
+    const std::filesystem::path output_path = base / relative_output_path;
+    if (typeflag == '5' || archive_path.string().ends_with('/')) {
+      std::filesystem::create_directories(output_path, ec);
+      if (ec) {
+        error = "failed to create directory: " + ec.message();
+        return false;
+      }
+    } else if (typeflag == '\0' || typeflag == '0') {
+      std::filesystem::create_directories(output_path.parent_path(), ec);
+      if (ec) {
+        error = "failed to create parent directory: " + ec.message();
+        return false;
+      }
+
+      std::ofstream output(output_path, std::ios::binary);
+      if (!output) {
+        error = "failed to create output file";
+        return false;
+      }
+
+      output.write(reinterpret_cast<const char*>(tar_data.data() + offset),
+                   static_cast<std::streamsize>(file_size));
+      if (!output) {
+        error = "failed to write output file";
+        return false;
+      }
+    } else if (typeflag == '2') {
+      std::filesystem::create_directories(output_path.parent_path(), ec);
+      if (ec) {
+        error = "failed to create parent directory: " + ec.message();
+        return false;
+      }
+
+      std::filesystem::remove(output_path, ec);
+      if (ec && std::filesystem::exists(output_path)) {
+        error = "failed to replace existing symlink path: " + ec.message();
+        return false;
+      }
+
+      std::filesystem::create_symlink(link_target, output_path, ec);
+      if (ec) {
+        error = "failed to create symlink: " + ec.message();
+        return false;
+      }
+    } else {
+      error = "unsupported tar entry type";
+      return false;
+    }
+
+    const std::size_t padding = (kTarBlockSize - (file_size % kTarBlockSize)) % kTarBlockSize;
+    offset += static_cast<std::size_t>(file_size) + padding;
+  }
+
+  error = "tar archive is missing end marker";
+  return false;
 }
 
 std::filesystem::path default_output_path(const std::filesystem::path& input_path,
@@ -321,10 +536,10 @@ bool compress_directory_streaming(const std::filesystem::path& input_path,
                                   std::string& error) {
   switch (algorithm) {
     case CompressionAlgorithm::Zstd:
-      return compress_directory_with_codec<algorithms::ZstdCompressor>(
+      return compress_directory_with_codec<codecs::ZstdStreamCompressor>(
           input_path, output_path, compression_level, error);
     case CompressionAlgorithm::Gzip:
-      return compress_directory_with_codec<algorithms::GzipCompressor>(
+      return compress_directory_with_codec<codecs::GzipStreamCompressor>(
           input_path, output_path, compression_level, error);
     case CompressionAlgorithm::Store:
       return compress_directory_store(input_path, output_path, error);
@@ -344,10 +559,10 @@ bool compress_file_streaming(const std::filesystem::path& input_path,
                              std::string& error) {
   switch (algorithm) {
     case CompressionAlgorithm::Zstd:
-      return compress_file_with_codec<algorithms::ZstdCompressor>(
+      return compress_file_with_codec<codecs::ZstdStreamCompressor>(
           input_path, output_path, compression_level, error);
     case CompressionAlgorithm::Gzip:
-      return compress_file_with_codec<algorithms::GzipCompressor>(
+      return compress_file_with_codec<codecs::GzipStreamCompressor>(
           input_path, output_path, compression_level, error);
     case CompressionAlgorithm::Store:
       return compress_file_store(input_path, output_path, error);
@@ -487,10 +702,10 @@ bool benchmark_file_algorithm(const std::filesystem::path& input_path,
                               std::string& error) {
   switch (algorithm) {
     case CompressionAlgorithm::Zstd:
-      return benchmark_file_with_codec<algorithms::ZstdCompressor>(
+      return benchmark_file_with_codec<codecs::ZstdStreamCompressor>(
           input_path, compression_level, output_size, error);
     case CompressionAlgorithm::Gzip:
-      return benchmark_file_with_codec<algorithms::GzipCompressor>(
+      return benchmark_file_with_codec<codecs::GzipStreamCompressor>(
           input_path, compression_level, output_size, error);
     case CompressionAlgorithm::Store:
       return benchmark_file_store(input_path, output_size, error);
@@ -510,10 +725,10 @@ bool benchmark_directory_algorithm(const std::filesystem::path& input_path,
                                    std::string& error) {
   switch (algorithm) {
     case CompressionAlgorithm::Zstd:
-      return benchmark_directory_with_codec<algorithms::ZstdCompressor>(
+      return benchmark_directory_with_codec<codecs::ZstdStreamCompressor>(
           input_path, compression_level, output_size, error);
     case CompressionAlgorithm::Gzip:
-      return benchmark_directory_with_codec<algorithms::GzipCompressor>(
+      return benchmark_directory_with_codec<codecs::GzipStreamCompressor>(
           input_path, compression_level, output_size, error);
     case CompressionAlgorithm::Store:
       return benchmark_directory_store(input_path, output_size, error);
@@ -572,7 +787,7 @@ bool recommend_algorithm(const std::filesystem::path& input_path,
 
 }  // namespace
 
-Analysis Engine::analyze(const std::filesystem::path& path) const {
+Analysis Engine::analyze(const std::filesystem::path& path, int compression_level) const {
   Analysis analysis;
   analysis.input_path = path;
 
@@ -589,7 +804,7 @@ Analysis Engine::analyze(const std::filesystem::path& path) const {
     analysis.size = std::filesystem::file_size(path, ec);
     AlgorithmRecommendation recommendation;
     std::string error;
-    if (recommend_algorithm(path, analysis.kind, kBenchmarkCompressionLevel, recommendation, error)) {
+    if (recommend_algorithm(path, analysis.kind, compression_level, recommendation, error)) {
       analysis.recommended_algorithm = std::string(algorithm_name(recommendation.algorithm));
       analysis.recommendation_reason = recommendation.reason;
     } else {
@@ -611,7 +826,7 @@ Analysis Engine::analyze(const std::filesystem::path& path) const {
 
     AlgorithmRecommendation recommendation;
     std::string error;
-    if (recommend_algorithm(path, analysis.kind, kBenchmarkCompressionLevel, recommendation, error)) {
+    if (recommend_algorithm(path, analysis.kind, compression_level, recommendation, error)) {
       analysis.recommended_algorithm = std::string(algorithm_name(recommendation.algorithm));
       analysis.recommendation_reason = recommendation.reason;
     } else {
@@ -631,7 +846,7 @@ OperationResult Engine::compress(const std::filesystem::path& path,
                                  const std::filesystem::path& output_path,
                                  int compression_level,
                                  std::string_view algorithm) const {
-  const Analysis analysis = analyze(path);
+  const Analysis analysis = analyze(path, compression_level);
 
   if (analysis.kind == InputKind::Missing) {
     return make_error(path, "input path does not exist");
@@ -684,11 +899,29 @@ OperationResult Engine::compress(const std::filesystem::path& path,
 
 OperationResult Engine::extract(const std::filesystem::path& archive_path,
                                 const std::filesystem::path& destination) const {
-  OperationResult result;
-  result.input_path = archive_path;
-  result.output_path = destination;
-  result.message = "extract is reserved for a later version";
-  return result;
+  std::error_code ec;
+  if (!std::filesystem::exists(archive_path, ec)) {
+    return make_error(archive_path, "archive path does not exist");
+  }
+  if (!std::filesystem::is_regular_file(archive_path, ec)) {
+    return make_error(archive_path, "archive path is not a regular file");
+  }
+
+  std::vector<std::byte> tar_data;
+  std::string algorithm;
+  std::string error;
+  const std::filesystem::path output_path = destination.empty() ? std::filesystem::path{"."} : destination;
+
+  const bool ok = decode_archive_stream(archive_path, tar_data, algorithm, error) &&
+                  extract_tar_stream(tar_data, output_path, error);
+
+  return OperationResult{
+      .ok = ok,
+      .input_path = archive_path,
+      .output_path = output_path,
+      .algorithm = algorithm,
+      .message = ok ? "extraction completed" : error,
+  };
 }
 
 }  // namespace mantis::core

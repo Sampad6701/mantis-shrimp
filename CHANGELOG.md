@@ -4,13 +4,28 @@ All notable changes to Mantis Shrimp are documented in this file.
 
 ## Project Status
 
-**Current Phase**: Foundation (v0.3.x) - Early Development
+**Current Phase**: Polish & Stability (v0.4.x) - Under Development
 - Full feature implementation for core compression functionality
 - Not yet production-ready - breaking changes possible
 - API and CLI may evolve
 - Stability target: v1.0
 
 ---
+
+## [0.4.0-dev] - Under Development
+
+### Added
+- `ms` command-mode UX for all six codecs: zstd, gzip, brotli, lz4, xz, and zip
+- Directory archive formats: `tar.zst`, `tar.gz`, `tar.br`, `tar.lz4`, `tar.xz`, `tar`, and `zip`
+- Compression profiles: `--fast`, `--balanced`, `--max`, plus advanced `--level`
+- Thread option plumbing with `--threads auto|N`
+- Native threaded compression path for zstd and xz codec backends
+- ZIP directory archive creation
+- Symlink preservation for tar-based directory archives
+
+### Changed
+- Analysis now uses the same compression level/profile as compression by default
+- CLI output now clearly states level/profile and threading behavior
 
 ## [0.3.0] - 2026-04-21
 

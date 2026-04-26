@@ -1,6 +1,6 @@
-# Mantis Shrimp v0.3.0 (Early Development)
+# Mantis Shrimp v0.4.0-dev (Under Development)
 
-**Development Status**: This project is in active development. v0.3.0 is a feature-complete **proof of concept** with working compression functionality, not yet production-ready. Breaking changes may occur.
+**Development Status**: This project is in active development. v0.4.0 is under development with CLI/UX polish, expanded command-mode codec support, and performance work in progress. Breaking changes may occur.
 
 Mantis Shrimp is a universal compression utility with a smart engine that automatically selects the best algorithm for your data.
 
@@ -50,6 +50,12 @@ echo "Hello, world!" > example.txt
 ./build/mantis
 ```
 
+The build also creates the short `ms` command by default. Disable it during setup with:
+
+```bash
+cmake -S . -B build -DMANTIS_INSTALL_SHORT_ALIAS=OFF
+```
+
 ## Prerequisites
 
 - CMake 3.20 or higher
@@ -65,30 +71,36 @@ echo "Hello, world!" > example.txt
 ### Install Dependencies
 
 **Ubuntu/Debian:**
+
 ```bash
 sudo apt update
 sudo apt install cmake g++ libzstd-dev zlib1g-dev libbrotli-dev liblz4-dev liblzma-dev libzip-dev pkg-config
 ```
 
 **macOS:**
+
 ```bash
 brew install cmake zstd zlib brotli lz4 xz libzip pkg-config
 ```
 
 **Fedora/RHEL:**
+
 ```bash
 sudo dnf install cmake gcc-c++ libzstd-devel zlib-devel brotli-devel lz4-devel xz-devel libzip-devel pkgconfig
 ```
 
 ## Usage
 
-The CLI is **fully interactive**. Simply run:
+Run with no arguments for the interactive menu:
 
 ```bash
 ./build/mantis
+# or, when the short alias is enabled:
+./build/ms
 ```
 
 You'll be guided through:
+
 1. **Main Menu** - Choose action (Compress, Decompress, Analyze, List Codecs)
 2. **File Selection** - Enter file or directory path
 3. **Analysis** - Optional: See compression ratios for all algorithms
@@ -125,12 +137,12 @@ COMPRESSION ANALYSIS RESULTS
 
 Algorithm    Compressed       Ratio       Status
 --------------------------------------------------
-zstd         125437           34.22%      
-gzip         142156           42.15%      
+zstd         125437           34.22%    
+gzip         142156           42.15%    
 brotli       119834           31.45%      BEST
-lz4          289456           78.34%      
-xz           112234           29.11%      
-zip          125000           34.10%      
+lz4          289456           78.34%    
+xz           112234           29.11%    
+zip          125000           34.10%    
 
 --------------------------------------------------
 RECOMMENDATION: brotli
@@ -175,16 +187,70 @@ Algorithm: brotli
 4. **List Codecs** - Display available algorithms
 5. **Exit** - Quit the application
 
+### Fast Command Mode
+
+The short command form is:
+
+```bash
+ms <input> -c <format> [output]
+ms <archive> -e [output]
+ms <input> -a
+```
+
+Compression defaults to the balanced profile, which is level 6. This is not maximum
+compression; it is the default tradeoff between output size and time/CPU. Use profiles
+when you want to be explicit:
+
+```bash
+ms ipynb_files -c tar.zst --fast      # level 3, faster/larger
+ms ipynb_files -c tar.zst --balanced  # level 6, default
+ms ipynb_files -c tar.zst --max       # level 11, smaller/slower
+ms ipynb_files -c tar.zst -l 9        # advanced manual level
+```
+
+Examples:
+
+```bash
+# Compress a directory to ipynb_files.tar.zst
+ms ipynb_files -c tar.zst
+
+# Compress with an explicit output name
+ms ipynb_files -c tar.zst notebooks_backup.tar.zst
+
+# Extract into ./ipynb_files
+ms ipynb_files.tar.zst -e
+
+# Extract into ./restored_ipynbs
+ms ipynb_files.tar.zst -e restored_ipynbs
+
+# Analyze without opening the menu
+ms ipynb_files -a
+
+# Analyze the exact max-compression profile
+ms ipynb_files -a --max
+```
+
+Supported command-mode formats are `tar.zst`, `tar.gz`, `tar.br`, `tar.lz4`, `tar.xz`, `tar`, `zst`, `gz`, `br`, `lz4`, `xz`, `zip`, and `raw`.
+
+Threading is supported where the codec backend exposes it cleanly:
+
+```bash
+ms ipynb_files -c tar.zst --threads auto
+ms ipynb_files -c tar.xz --threads 8
+```
+
+Currently, `zstd` and `xz` use worker threads. `gzip`, `brotli`, `lz4`, and `zip` are single-stream in this release path.
+
 ## Algorithm Selection Guide
 
-| Algorithm | Speed | Ratio | Best For |
-|-----------|-------|-------|----------|
-| **zstd** | Very Fast | Excellent | General use (default) |
-| **gzip** | Fast | Good | Compatibility, legacy systems |
-| **brotli** | Fast | Excellent | Web assets, text |
-| **lz4** | Fastest | Poor | Real-time, streaming |
-| **xz** | Slow | Excellent | Maximum compression, archival |
-| **zip** | Fast | Very Good | Archive compatibility |
+| Algorithm        | Speed     | Ratio     | Best For                      |
+| ---------------- | --------- | --------- | ----------------------------- |
+| **zstd**   | Very Fast | Excellent | General use (default)         |
+| **gzip**   | Fast      | Good      | Compatibility, legacy systems |
+| **brotli** | Fast      | Excellent | Web assets, text              |
+| **lz4**    | Fastest   | Poor      | Real-time, streaming          |
+| **xz**     | Slow      | Excellent | Maximum compression, archival |
+| **zip**    | Fast      | Very Good | Archive compatibility         |
 
 ## Binary Footprint
 
@@ -194,14 +260,14 @@ Mantis Shrimp includes all 6 codec implementations in a single binary - leveragi
 
 Each algorithm has different speed/compression tradeoffs. The smart engine benchmarks your specific data:
 
-| Algorithm | Characteristics | Best For |
-|-----------|-----------------|----------|
-| **zstd** | Balanced, fast compression | General use, modern systems |
-| **gzip** | Legacy, widely supported | Compatibility, existing toolchains |
-| **brotli** | Strong compression, slower | Web assets, highly compressible text |
-| **lz4** | Ultra-fast, weak compression | Real-time, streaming scenarios |
-| **xz** | Maximum compression, very slow | Archival, maximum density |
-| **zip** | Archive format, good compatibility | Cross-platform archive needs |
+| Algorithm        | Characteristics                    | Best For                             |
+| ---------------- | ---------------------------------- | ------------------------------------ |
+| **zstd**   | Balanced, fast compression         | General use, modern systems          |
+| **gzip**   | Legacy, widely supported           | Compatibility, existing toolchains   |
+| **brotli** | Strong compression, slower         | Web assets, highly compressible text |
+| **lz4**    | Ultra-fast, weak compression       | Real-time, streaming scenarios       |
+| **xz**     | Maximum compression, very slow     | Archival, maximum density            |
+| **zip**    | Archive format, good compatibility | Cross-platform archive needs         |
 
 **Tip**: Use `./build/mantis` and select "Analyze compression options" to benchmark all codecs with your actual data.
 
@@ -252,8 +318,8 @@ mantis-shrimp/
 │   │   └── main.cpp
 │   ├── codecs/
 │   │   ├── codec_registry.cpp
-│   │   ├── zstd_codec_v2.cpp
-│   │   ├── gzip_codec_v2.cpp
+│   │   ├── zstd_codec.cpp
+│   │   ├── gzip_codec.cpp
 │   │   ├── brotli_codec.cpp
 │   │   ├── lz4_codec.cpp
 │   │   ├── xz_codec.cpp
@@ -269,27 +335,6 @@ mantis-shrimp/
 ├── README.md
 └── CHANGELOG.md
 ```
-
-## Development Roadmap
-
-**Phase 1 - Foundation (v0.3 CURRENT)**
-- ✅ All major compression codecs (zstd, gzip, brotli, lz4, xz, zip)
-- ✅ Interactive CLI with analysis and auto-selection
-- ✅ Public C++ API
-- ✅ Smart benchmarking engine
-
-**Phase 2 - Polish & Stability (v0.4-0.5)**
-- 🔄 Enhanced error handling and edge cases
-- 🔄 Performance optimization
-- 🔄 Comprehensive test coverage
-- 🔄 GUI wrapper (planned)
-
-**Phase 3 - Integration (v0.6+)**
-- ⏳ Context menu integration
-- ⏳ Custom codec plugins
-- ⏳ Cloud streaming support
-
-**Stability Target for Production: v1.0**
 
 ## License
 

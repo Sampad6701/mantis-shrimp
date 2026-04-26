@@ -3,8 +3,8 @@
 #include "lz4_codec.hpp"
 #include "xz_codec.hpp"
 #include "zip_codec.hpp"
-#include "zstd_codec_v2.hpp"
-#include "gzip_codec_v2.hpp"
+#include "zstd_codec.hpp"
+#include "gzip_codec.hpp"
 #include <algorithm>
 
 namespace mantis::codecs {

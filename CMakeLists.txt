@@ -1,16 +1,18 @@
 cmake_minimum_required(VERSION 3.20)
 
 # Mantis Shrimp - Universal Compression Utility
-# Current Status: Early Development (v0.3.x)
+# Current Status: Early Development (v0.4.x)
 # Not production-ready. API and CLI subject to change.
 # Stability target: v1.0
 
-project(mantis_shrimp VERSION 0.3.0 LANGUAGES CXX)
+project(mantis_shrimp VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include(GNUInstallDirs)
+
+option(MANTIS_INSTALL_SHORT_ALIAS "Build and install the ms command alias" ON)
 
 find_package(PkgConfig REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -26,11 +28,9 @@ add_library(
   src/core/engine.cpp
   src/core/smart_engine.cpp
   src/archive/tar_writer.cpp
-  src/algorithms/zstd_codec.cpp
-  src/algorithms/gzip_codec.cpp
   src/codecs/codec_registry.cpp
-  src/codecs/zstd_codec_v2.cpp
-  src/codecs/gzip_codec_v2.cpp
+  src/codecs/zstd_codec.cpp
+  src/codecs/gzip_codec.cpp
   src/codecs/brotli_codec.cpp
   src/codecs/lz4_codec.cpp
   src/codecs/xz_codec.cpp
@@ -81,6 +81,11 @@ target_compile_options(
 
 add_executable(mantis src/cli/main.cpp)
 target_link_libraries(mantis PRIVATE mantis_shrimp_lib)
+
+if(MANTIS_INSTALL_SHORT_ALIAS)
+  add_executable(ms src/cli/main.cpp)
+  target_link_libraries(ms PRIVATE mantis_shrimp_lib)
+endif()
 
 enable_testing()
 
@@ -140,6 +145,13 @@ install(
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(MANTIS_INSTALL_SHORT_ALIAS)
+  install(
+    TARGETS ms
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+endif()
 
 install(
   DIRECTORY include/

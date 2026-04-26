@@ -16,6 +16,14 @@ public:
         std::string& error
     ) override;
 
+    bool compress(
+        const fs::path& input,
+        const fs::path& output,
+        int level,
+        int threads,
+        std::string& error
+    ) override;
+
     bool decompress(
         const fs::path& input,
         const fs::path& output,
